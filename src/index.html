@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>BlinkRead — Eye-controlled document reader</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;500;700;800&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0a0f;
+  --surface: #13131a;
+  --surface2: #1c1c26;
+  --border: rgba(255,255,255,0.08);
+  --border2: rgba(255,255,255,0.14);
+  --text: #f0f0f5;
+  --muted: rgba(240,240,245,0.45);
+  --accent: #7c6dfa;
+  --accent2: #a896ff;
+  --green: #3dffa0;
+  --red: #ff5f6d;
+  --mono: 'DM Mono', monospace;
+  --sans: 'Syne', sans-serif;
+  --r: 12px;
+  --r-sm: 8px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--sans); }
+
+#app { display: grid; grid-template-rows: 52px 1fr 48px; height: 100dvh; max-width: 1200px; margin: 0 auto; }
+
+/* HEADER */
+#header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 16px; border-bottom: 1px solid var(--border); background: var(--surface);
+}
+.logo { font-weight: 800; font-size: 16px; letter-spacing: -0.03em; }
+.logo span { color: var(--accent2); }
+.spacer { flex: 1; }
+#upload-btn {
+  display: flex; align-items: center; gap: 6px; padding: 6px 14px;
+  border-radius: var(--r-sm); border: 1px solid var(--border2); background: transparent;
+  color: var(--text); font-family: var(--sans); font-size: 13px; font-weight: 500; cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+#upload-btn:hover { background: var(--surface2); border-color: var(--accent); }
+#file-input { display: none; }
+#sidebar-toggle {
+  display: none; align-items: center; padding: 6px 10px;
+  border-radius: var(--r-sm); border: 1px solid var(--border2);
+  background: transparent; color: var(--text); cursor: pointer;
+}
+@media (max-width: 640px) { #sidebar-toggle { display: flex; } }
+
+/* MAIN */
+#main { display: grid; grid-template-columns: 1fr 240px; overflow: hidden; }
+@media (max-width: 640px) {
+  #main { grid-template-columns: 1fr; }
+  #sidebar { display: none; }
+  #sidebar.open {
+    display: flex; position: fixed; inset: 52px 0 48px auto;
+    width: min(280px, 90vw); z-index: 100; border-left: 1px solid var(--border2);
+  }
+}
+
+/* READER */
+#reader {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  overflow: hidden; position: relative; background: var(--bg); padding: 16px;
+}
+#canvas-wrap {
+  position: relative; max-width: 100%; max-height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: var(--r); overflow: hidden;
+  box-shadow: 0 0 0 1px var(--border), 0 24px 80px rgba(0,0,0,.7);
+}
+#canvas-wrap.turning { animation: turn .35s ease forwards; }
+@keyframes turn {
+  0%   { transform: scaleX(1); opacity: 1; }
+  45%  { transform: scaleX(.05); opacity: .3; }
+  55%  { transform: scaleX(.05); opacity: .3; }
+  100% { transform: scaleX(1); opacity: 1; }
+}
+#pdf-canvas { display: block; max-width: 100%; max-height: calc(100dvh - 52px - 48px - 32px); object-fit: contain; border-radius: var(--r); }
+
+/* mobile next overlay — visible on touch devices when doc is loaded */
+#mobile-next {
+  display: none;
+  position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%);
+  padding: 12px 28px; border-radius: 100px;
+  background: rgba(168,150,255,0.15); border: 1px solid var(--accent2);
+  color: var(--accent2); font-family: var(--sans); font-size: 14px; font-weight: 600;
+  cursor: pointer; backdrop-filter: blur(8px); white-space: nowrap;
+  transition: background .15s;
+}
+#mobile-next:hover { background: rgba(168,150,255,0.25); }
+@media (max-width: 640px) { #mobile-next.visible { display: block; } }
+
+/* DROP ZONE */
+#drop-zone {
+  display: flex; flex-direction: column; align-items: center; gap: 16px;
+  color: var(--muted); text-align: center; padding: 32px;
+}
+#drop-zone svg { opacity: .3; }
+#drop-zone h2 { font-size: 20px; font-weight: 700; color: var(--text); }
+#drop-zone p { font-size: 14px; line-height: 1.6; }
+.formats { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-top: 4px; }
+.fmt-pill { font-family: var(--mono); font-size: 11px; padding: 3px 10px; border-radius: 100px; border: 1px solid var(--border2); color: var(--muted); }
+
+/* BLINK FLASH */
+#blink-flash {
+  position: fixed; inset: 0; background: white; opacity: 0;
+  pointer-events: none; z-index: 999;
+}
+#blink-flash.flash { animation: bflash .3s ease; }
+@keyframes bflash { 0%{opacity:0} 15%{opacity:.12} 100%{opacity:0} }
+
+/* SIDEBAR */
+#sidebar {
+  display: flex; flex-direction: column;
+  background: var(--surface); border-left: 1px solid var(--border);
+  overflow-y: auto; overflow-x: hidden;
+}
+.panel { border-bottom: 1px solid var(--border); padding: 14px 16px; }
+.panel-title { font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; }
+
+/* CAMERA */
+#cam-container {
+  position: relative; width: 100%; aspect-ratio: 4/3;
+  background: #000; border-radius: var(--r-sm); overflow: hidden; border: 1px solid var(--border2);
+}
+#cam-video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); display: block; }
+#cam-canvas { position: absolute; inset: 0; width: 100%; height: 100%; transform: scaleX(-1); }
+#cam-status { position: absolute; bottom: 6px; left: 6px; right: 6px; display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 10px; color: rgba(255,255,255,.7); }
+#status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--red); flex-shrink: 0; transition: background .3s; }
+#status-dot.ok { background: var(--green); }
+#cam-start-btn {
+  width: 100%; padding: 8px; border-radius: var(--r-sm);
+  border: 1px solid var(--border2); background: transparent;
+  color: var(--text); font-family: var(--sans); font-size: 13px; font-weight: 500;
+  cursor: pointer; transition: background .15s; margin-top: 10px;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+}
+#cam-start-btn:hover { background: var(--surface2); }
+#cam-start-btn.active { border-color: var(--green); color: var(--green); }
+
+/* EAR BARS */
+.ear-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.ear-label { font-family: var(--mono); font-size: 10px; color: var(--muted); width: 16px; }
+.ear-bar-bg { flex: 1; height: 4px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
+.ear-bar { height: 100%; border-radius: 2px; background: var(--green); transition: width .08s, background .08s; }
+.ear-val { font-family: var(--mono); font-size: 10px; color: var(--muted); width: 32px; text-align: right; }
+
+/* CALIBRATION HINT */
+#calib-hint {
+  margin-top: 8px; padding: 6px 8px; border-radius: var(--r-sm);
+  background: var(--surface2); font-size: 10px; color: var(--muted); line-height: 1.5;
+  display: none;
+}
+#calib-hint.show { display: block; }
+
+/* BLINK LOG */
+#blink-log { display: flex; flex-direction: column; gap: 4px; max-height: 120px; overflow-y: auto; }
+.blink-entry { font-family: var(--mono); font-size: 10px; color: var(--muted); display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 4px; background: var(--surface2); }
+.btype { font-weight: 500; }
+.btype.intent { color: var(--accent2); }
+.btype.auto { color: var(--muted); }
+
+/* SETTINGS */
+.setting-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.setting-label { font-size: 12px; color: var(--muted); flex: 1; line-height: 1.3; }
+.setting-val { font-family: var(--mono); font-size: 11px; color: var(--text); width: 36px; text-align: right; }
+input[type=range] { flex: 1; -webkit-appearance: none; appearance: none; height: 3px; background: var(--surface2); border-radius: 2px; outline: none; }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--accent2); cursor: pointer; }
+input[type=range]::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: var(--accent2); cursor: pointer; border: none; }
+.tip { font-size: 10px; color: var(--muted); line-height: 1.6; margin-top: 6px; }
+.tip span { color: var(--accent2); }
+
+/* FOOTER */
+#footer { display: flex; align-items: center; gap: 12px; padding: 0 16px; border-top: 1px solid var(--border); background: var(--surface); }
+.page-info { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.foot-btn { display: flex; align-items: center; gap: 5px; padding: 6px 12px; border-radius: var(--r-sm); border: 1px solid var(--border2); background: transparent; color: var(--text); font-family: var(--sans); font-size: 12px; font-weight: 500; cursor: pointer; transition: background .15s; }
+.foot-btn:hover { background: var(--surface2); }
+.foot-btn:disabled { opacity: .3; cursor: default; }
+#blink-counter { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+
+/* GESTURE HINT TOAST */
+#gesture-hint {
+  position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%);
+  background: var(--surface2); border: 1px solid var(--border2); border-radius: var(--r);
+  padding: 10px 18px; font-size: 13px; color: var(--text); text-align: center;
+  opacity: 0; transition: opacity .3s; pointer-events: none; z-index: 50; white-space: nowrap;
+}
+#gesture-hint.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div id="blink-flash"></div>
+<div id="gesture-hint"></div>
+
+<div id="app">
+  <header id="header">
+    <div class="logo">Blink<span>Read</span></div>
+    <div class="spacer"></div>
+    <button id="upload-btn" onclick="document.getElementById('file-input').click()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      Open file
+    </button>
+    <input type="file" id="file-input" accept=".pdf">
+    <button id="sidebar-toggle" onclick="toggleSidebar()">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg>
+    </button>
+  </header>
+
+  <div id="main">
+    <div id="reader"
+      ondragover="event.preventDefault();event.currentTarget.style.outline='2px dashed var(--accent)'"
+      ondragleave="event.currentTarget.style.outline=''"
+      ondrop="handleDrop(event)">
+
+      <div id="drop-zone">
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+        <h2>Drop a PDF here</h2>
+        <p>Or click "Open file" above.<br>Start the camera, then blink slowly to turn pages.</p>
+        <div class="formats">
+          <span class="fmt-pill">PDF</span>
+          <span class="fmt-pill">EPUB soon</span>
+          <span class="fmt-pill">PPTX soon</span>
+        </div>
+      </div>
+
+      <div id="canvas-wrap" style="display:none">
+        <canvas id="pdf-canvas"></canvas>
+        <button id="mobile-next" onclick="changePage(1)">Next page ▶</button>
+      </div>
+    </div>
+
+    <aside id="sidebar">
+      <!-- CAMERA -->
+      <div class="panel">
+        <div class="panel-title">Camera · eye tracking</div>
+        <div id="cam-container">
+          <video id="cam-video" playsinline autoplay muted></video>
+          <canvas id="cam-canvas"></canvas>
+          <div id="cam-status">
+            <div id="status-dot"></div>
+            <span id="status-text">camera off</span>
+          </div>
+        </div>
+        <button id="cam-start-btn" onclick="toggleCamera()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
+          Start camera
+        </button>
+        <div style="margin-top:12px">
+          <div class="ear-row">
+            <div class="ear-label">L</div>
+            <div class="ear-bar-bg"><div class="ear-bar" id="ear-l" style="width:100%"></div></div>
+            <div class="ear-val" id="ear-l-val">—</div>
+          </div>
+          <div class="ear-row">
+            <div class="ear-label">R</div>
+            <div class="ear-bar-bg"><div class="ear-bar" id="ear-r" style="width:100%"></div></div>
+            <div class="ear-val" id="ear-r-val">—</div>
+          </div>
+          <div id="calib-hint">
+            💡 Open-eye EAR is typically 0.25–0.40. Set threshold below your lowest relaxed value. Check blink log ms to tune hold time.
+          </div>
+        </div>
+      </div>
+
+      <!-- SETTINGS -->
+      <div class="panel">
+        <div class="panel-title">Settings</div>
+        <div class="setting-row">
+          <div class="setting-label">EAR threshold</div>
+          <input type="range" id="ear-thresh" min="0.10" max="0.30" step="0.01" value="0.15" oninput="updateSettings()">
+          <div class="setting-val" id="ear-thresh-val">0.15</div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label">Hold time (ms)</div>
+          <input type="range" id="hold-time" min="10" max="500" step="5" value="80" oninput="updateSettings()">
+          <div class="setting-val" id="hold-time-val">80</div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label">Both eyes required</div>
+          <input type="checkbox" id="both-eyes" style="width:16px;height:16px;cursor:pointer;accent-color:var(--accent2)">
+        </div>
+        <div class="tip">
+          <span>Long blink</span> → next page<br>
+          <span>2× long blink</span> → previous page<br>
+          <span>→ / Space</span> keyboard fallback
+        </div>
+      </div>
+
+      <!-- BLINK LOG -->
+      <div class="panel" style="flex:1">
+        <div class="panel-title">Blink log <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0" id="blink-counter-label"></span></div>
+        <div id="blink-log"></div>
+        <div class="tip" style="margin-top:8px">Check ms column — if auto blinks near threshold, raise hold time by 20–30 ms.</div>
+      </div>
+    </aside>
+  </div>
+
+  <footer id="footer">
+    <button class="foot-btn" id="prev-btn" onclick="changePage(-1)" disabled>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+      Prev
+    </button>
+    <button class="foot-btn" id="next-btn" onclick="changePage(1)" disabled>
+      Next
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+    </button>
+    <div class="spacer"></div>
+    <div class="page-info" id="page-info">—</div>
+    <div class="spacer"></div>
+    <div id="blink-counter" style="font-family:var(--mono);font-size:11px;color:var(--muted)">blinks: 0</div>
+  </footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+// ── State ──
+let pdfDoc = null, currentPage = 1, totalPages = 0, rendering = false;
+let cameraActive = false, faceMesh = null, mpCamera = null;
+let totalBlinks = 0, sidebarOpen = false;
+
+// Blink FSM
+let blinkStartTime = null, isBlinking = false;
+let lastIntentBlink = 0, pendingSecondBlink = false, pendingTimer = null;
+
+// Settings — defaults tuned from real-world testing
+let EAR_THRESHOLD = 0.15;  // safe margin: open ~0.30+, closed ~0.07–0.15
+let HOLD_MS = 80;           // deliberate blink; natural involuntary ~100–150 ms
+
+// MediaPipe landmark indices for each eye (6-point EAR model)
+const LEFT_EYE  = [362, 385, 387, 263, 373, 380];
+const RIGHT_EYE = [33,  160, 158, 133, 153, 144];
+
+function updateSettings() {
+  EAR_THRESHOLD = parseFloat(document.getElementById('ear-thresh').value);
+  HOLD_MS = parseInt(document.getElementById('hold-time').value);
+  document.getElementById('ear-thresh-val').textContent = EAR_THRESHOLD.toFixed(2);
+  document.getElementById('hold-time-val').textContent = HOLD_MS;
+}
+
+function toggleSidebar() {
+  sidebarOpen = !sidebarOpen;
+  document.getElementById('sidebar').classList.toggle('open', sidebarOpen);
+}
+
+// ── File handling ──
+document.getElementById('file-input').addEventListener('change', e => {
+  if (e.target.files[0]) loadFile(e.target.files[0]);
+});
+
+function handleDrop(e) {
+  e.preventDefault();
+  e.currentTarget.style.outline = '';
+  if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+}
+
+async function loadFile(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (ext !== 'pdf') { showHint('Only PDF supported in this build. EPUB/PPTX coming soon!'); return; }
+  const buf = await file.arrayBuffer();
+  pdfDoc = await pdfjsLib.getDocument({ data: buf }).promise;
+  totalPages = pdfDoc.numPages;
+  currentPage = 1;
+  document.getElementById('drop-zone').style.display = 'none';
+  document.getElementById('canvas-wrap').style.display = 'flex';
+  document.getElementById('mobile-next').classList.add('visible');
+  document.getElementById('prev-btn').disabled = false;
+  document.getElementById('next-btn').disabled = false;
+  renderPage(currentPage);
+}
+
+async function renderPage(n) {
+  if (rendering) return;
+  rendering = true;
+  const page = await pdfDoc.getPage(n);
+  const canvas = document.getElementById('pdf-canvas');
+  const wrap = document.getElementById('canvas-wrap');
+  const maxW = wrap.parentElement.clientWidth - 32;
+  const maxH = wrap.parentElement.clientHeight - 32;
+  const vp0 = page.getViewport({ scale: 1 });
+  const scale = Math.min(maxW / vp0.width, maxH / vp0.height, 2.5);
+  const vp = page.getViewport({ scale });
+  canvas.width = vp.width; canvas.height = vp.height;
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+  document.getElementById('page-info').textContent = `${n} / ${totalPages}`;
+  document.getElementById('prev-btn').disabled = n <= 1;
+  document.getElementById('next-btn').disabled = n >= totalPages;
+  rendering = false;
+}
+
+function changePage(delta) {
+  if (!pdfDoc) return;
+  const next = currentPage + delta;
+  if (next < 1 || next > totalPages) return;
+  const wrap = document.getElementById('canvas-wrap');
+  wrap.classList.add('turning');
+  setTimeout(() => wrap.classList.remove('turning'), 360);
+  currentPage = next;
+  renderPage(currentPage);
+  flashBlink();
+}
+
+function flashBlink() {
+  const el = document.getElementById('blink-flash');
+  el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+}
+
+function showHint(msg, dur = 2500) {
+  const h = document.getElementById('gesture-hint');
+  h.textContent = msg; h.classList.add('show');
+  clearTimeout(showHint._t);
+  showHint._t = setTimeout(() => h.classList.remove('show'), dur);
+}
+
+// ── EAR ──
+function dist(a, b) { return Math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2); }
+
+function computeEAR(lm, idx) {
+  const [p1,p2,p3,p4,p5,p6] = idx.map(i => lm[i]);
+  const den = 2.0 * dist(p1, p4);
+  return den === 0 ? 1 : (dist(p2,p6) + dist(p3,p5)) / den;
+}
+
+function updateEARUI(l, r) {
+  const MAX = 0.4;
+  ['l','r'].forEach((side, i) => {
+    const val = i === 0 ? l : r;
+    const bar = document.getElementById(`ear-${side}`);
+    const valEl = document.getElementById(`ear-${side}-val`);
+    bar.style.width = Math.min(100, (val/MAX)*100).toFixed(0) + '%';
+    bar.style.background = val < EAR_THRESHOLD ? 'var(--red)' : 'var(--green)';
+    valEl.textContent = val.toFixed(2);
+  });
+  // show calibration hint once camera is running
+  document.getElementById('calib-hint').classList.add('show');
+}
+
+// ── Blink FSM ──
+function processBlink(l, r) {
+  const bothReq = document.getElementById('both-eyes').checked;
+  const blinking = bothReq
+    ? (l < EAR_THRESHOLD && r < EAR_THRESHOLD)
+    : (l < EAR_THRESHOLD || r < EAR_THRESHOLD);
+
+  if (blinking && !isBlinking) {
+    isBlinking = true;
+    blinkStartTime = performance.now();
+  }
+
+  if (!blinking && isBlinking) {
+    isBlinking = false;
+    const dur = performance.now() - blinkStartTime;
+    const intent = dur >= HOLD_MS;
+
+    totalBlinks++;
+    document.getElementById('blink-counter').textContent = `blinks: ${totalBlinks}`;
+    document.getElementById('blink-counter-label').textContent = `· ${totalBlinks} total`;
+    logBlink(intent, dur);
+
+    if (intent) {
+      const now = performance.now();
+      if (pendingSecondBlink && (now - lastIntentBlink) < 1000) {
+        clearTimeout(pendingTimer);
+        pendingSecondBlink = false;
+        showHint('◀ Previous page');
+        changePage(-1);
+      } else {
+        lastIntentBlink = now;
+        pendingSecondBlink = true;
+        pendingTimer = setTimeout(() => {
+          if (pendingSecondBlink) {
+            pendingSecondBlink = false;
+            showHint('Next page ▶');
+            changePage(1);
+          }
+        }, 700);
+      }
+    }
+  }
+}
+
+function logBlink(intent, dur) {
+  const log = document.getElementById('blink-log');
+  const entry = document.createElement('div');
+  entry.className = 'blink-entry';
+  entry.innerHTML = `<span class="btype ${intent?'intent':'auto'}">${intent?'intentional':'auto'}</span><span>${dur.toFixed(0)}ms</span>`;
+  log.prepend(entry);
+  while (log.children.length > 25) log.removeChild(log.lastChild);
+}
+
+// ── Camera ──
+async function toggleCamera() {
+  cameraActive ? stopCamera() : await startCamera();
+}
+
+async function startCamera() {
+  const video = document.getElementById('cam-video');
+  const btn   = document.getElementById('cam-start-btn');
+  const dot   = document.getElementById('status-dot');
+  const txt   = document.getElementById('status-text');
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false
+    });
+    video.srcObject = stream;
+    cameraActive = true;
+    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg> Stop camera`;
+    btn.classList.add('active');
+    dot.classList.add('ok');
+    txt.textContent = 'loading model…';
+    initFaceMesh(video);
+  } catch(err) {
+    txt.textContent = 'denied — serve via localhost';
+    console.error(err);
+  }
+}
+
+function stopCamera() {
+  const video = document.getElementById('cam-video');
+  if (mpCamera) { mpCamera.stop(); mpCamera = null; }
+  if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
+  cameraActive = false;
+  document.getElementById('cam-start-btn').innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg> Start camera`;
+  document.getElementById('cam-start-btn').classList.remove('active');
+  document.getElementById('status-dot').classList.remove('ok');
+  document.getElementById('status-text').textContent = 'camera off';
+  document.getElementById('calib-hint').classList.remove('show');
+  const c = document.getElementById('cam-canvas');
+  c.getContext('2d').clearRect(0,0,c.width,c.height);
+}
+
+function initFaceMesh(video) {
+  faceMesh = new FaceMesh({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}` });
+  faceMesh.setOptions({ maxNumFaces:1, refineLandmarks:true, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
+  faceMesh.onResults(onResults);
+  mpCamera = new Camera(video, {
+    onFrame: async () => { await faceMesh.send({ image: video }); },
+    width: 320, height: 240
+  });
+  mpCamera.start()
+    .then(() => { document.getElementById('status-text').textContent = 'tracking active'; })
+    .catch(e => { document.getElementById('status-text').textContent = 'model error'; console.error(e); });
+}
+
+function onResults(results) {
+  const canvas = document.getElementById('cam-canvas');
+  const video  = document.getElementById('cam-video');
+  canvas.width  = video.videoWidth  || 320;
+  canvas.height = video.videoHeight || 240;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (!results.multiFaceLandmarks?.length) { updateEARUI(1,1); return; }
+
+  const lm = results.multiFaceLandmarks[0];
+  const W = canvas.width, H = canvas.height;
+
+  function drawEye(idx, color) {
+    ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 1;
+    idx.forEach((i,j) => { const p=lm[i]; j===0?ctx.moveTo(p.x*W,p.y*H):ctx.lineTo(p.x*W,p.y*H); });
+    ctx.closePath(); ctx.stroke();
+    idx.forEach(i => { const p=lm[i]; ctx.beginPath(); ctx.arc(p.x*W,p.y*H,2,0,Math.PI*2); ctx.fillStyle=color; ctx.fill(); });
+  }
+
+  const l = computeEAR(lm, LEFT_EYE);
+  const r = computeEAR(lm, RIGHT_EYE);
+  drawEye(LEFT_EYE,  l < EAR_THRESHOLD ? '#ff5f6d' : '#3dffa0');
+  drawEye(RIGHT_EYE, r < EAR_THRESHOLD ? '#ff5f6d' : '#3dffa0');
+  updateEARUI(l, r);
+  processBlink(l, r);
+}
+
+window.addEventListener('resize', () => { if (pdfDoc) renderPage(currentPage); });
+window.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); changePage(1); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); changePage(-1); }
+});
+</script>
+</body>
+</html>
